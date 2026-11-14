@@ -2,7 +2,7 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Huninn&family=Noto+Sans+TC:wght@400;500;700&display=swap">
-<style>
+<style id="tmjh-style">
 /* Layout: one column app, sticky tab bar, cards only for menus/orders; bento-box jade + bamboo yellow */
 :root {
   --bg: #f3f6f2; --surface: #ffffff; --surface-2: #e8eee7; --line: #d3ddd2;
@@ -31,7 +31,7 @@ header.top .wrap { display: flex; align-items: center; gap: 12px; flex-wrap: wra
 .brand-mark i { background: var(--accent-fg); opacity: .85; border-radius: 2px; }
 .brand-mark i:first-child { grid-row: span 2; background: var(--gold); opacity: 1; }
 nav.tabs { display: flex; gap: 4px; background: var(--surface-2); padding: 3px; border-radius: 999px; }
-nav.tabs button { border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 500; padding: 6px 14px; border-radius: 999px; cursor: pointer; }
+nav.tabs button { white-space: nowrap;  border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 500; padding: 6px 14px; border-radius: 999px; cursor: pointer; }
 nav.tabs button[aria-selected="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
 main { padding-block: 20px 60px; display: grid; gap: 20px; }
 h1, h2, h3 { font-family: var(--f-display); font-weight: 400; text-wrap: balance; margin: 0; line-height: 1.3; }
@@ -114,27 +114,15 @@ tfoot td { font-weight: 700; border-bottom: 0; }
 @keyframes sp { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
 .confirm { display: inline-flex; gap: 6px; align-items: center; }
+.order-pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 8px 0; font-family: ui-monospace, monospace; }
+#copy-fallback { font-size: 12px; }
+details summary { list-style-position: inside; }
 </style>
-
-<header class="top">
-  <div class="wrap">
-    <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>TMJH 訂餐站</div>
-    <nav class="tabs" role="tablist">
-      <button role="tab" id="tab-order" data-tab="order" aria-selected="true">點餐</button>
-      <button role="tab" id="tab-stats" data-tab="stats" aria-selected="false">訂單統計</button>
-      <button role="tab" id="tab-admin" data-tab="admin" aria-selected="false" hidden>菜單管理</button>
-    </nav>
-  </div>
-</header>
-<div class="wrap"><main id="app">
-  <div class="empty"><span class="spin"></span><p>正在載入菜單…</p></div>
-</main></div>
-<div id="toast" class="toast" hidden></div>
-
-<script>
-(() => {
+<div id="tmjh-root"></div>
+<script type="application/json" id="tmjh-data">{"menus":[]}</script>
+<script id="tmjh-app">(() => {
 "use strict";
-// ---------- defaults ----------
+// ---------- constants ----------
 const DEFAULT_OPTIONS = {
   bento: [
     { name: "飯量", multi: false, required: false, choices: [{ name: "正常", price: 0 }, { name: "飯少", price: 0 }, { name: "加飯", price: 10 }] },
@@ -148,40 +136,37 @@ const DEFAULT_OPTIONS = {
   ],
 };
 const TYPE_LABEL = { bento: "便當", drink: "飲料" };
+const MARK = "【訂餐】";
+const FONTS = '<link rel="preconnect" href="https://fonts.googleapis.com">\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Huninn&family=Noto+Sans+TC:wght@400;500;700&display=swap">\n';
+const RESET = ':root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px/1.5 system-ui,-apple-system,sans-serif}img{max-width:100%}[hidden]{display:none!important}';
+
+const BODY = '<header class="top"><div class="wrap"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>TMJH 訂餐站</div><nav class="tabs" id="tabs" role="tablist" hidden></nav></div></header><div class="wrap"><main id="app"></main></div><div id="toast" class="toast" hidden></div>';
+document.getElementById("tmjh-root").innerHTML = BODY;
 
 // ---------- state ----------
+let saved = { menus: [] };
+try { saved = JSON.parse(document.getElementById("tmjh-data").textContent) || saved; } catch {}
 const S = {
-  tab: "order", db: null, user: null, sample: null, isAdmin: false, myId: null,
-  menus: [], orders: [], loaded: { menus: false, orders: false }, loadError: "",
-  orderMenuId: null, sel: null, statsMenuId: null,
-  draft: null, files: [], recognizing: false, recogError: "", confirmDel: null,
+  tab: "order", menus: saved.menus || [], isOwner: false, artifact: null, sample: null,
+  orderMenuId: null, sel: null, cart: [], name: "", sentText: "",
+  draft: null, files: [], recognizing: false, recogError: "", confirmDel: null, saving: false,
+  tally: [], tallyMenu: "", pasteMsg: "",
 };
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = n => "$" + (Math.round(Number(n) || 0)).toLocaleString("zh-TW");
 const uid = () => Math.random().toString(36).slice(2, 9);
-const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+S.name = store.get("tmjh-name") || "";
+try { S.tally = JSON.parse(store.get("tmjh-tally") || "[]") || []; } catch { S.tally = []; }
 let toastT;
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2200); }
-
-// ---------- boot ----------
-async function boot() {
-  const timer = setTimeout(() => { if (!S.loaded.menus) { S.loadError = "連線逾時。請確認已登入 claude.ai 後重新開啟此頁。"; render(); } }, 10000);
-  const [db, user, sample] = await Promise.all([claude.use("db"), claude.use("user"), claude.use("sample")]);
-  S.db = db; S.user = user; S.sample = sample;
-  if (!db) { clearTimeout(timer); S.loadError = "需要登入 claude.ai 才能點餐與查看訂單。"; render(); return; }
-  try { S.isAdmin = user ? !!(await user.canEdit()) : false; } catch { S.isAdmin = false; }
-  try { S.myId = user ? await user.id() : null; } catch {}
-  $("#tab-admin").hidden = !S.isAdmin;
-  db.collection("menus").onSnapshot(snap => {
-    clearTimeout(timer);
-    S.menus = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    S.loaded.menus = true; render();
-  }, e => { clearTimeout(timer); S.loadError = "讀取菜單失敗：" + e.message; render(); });
-  db.collection("orders").onSnapshot(snap => {
-    S.orders = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.at || 0) - (b.at || 0));
-    S.loaded.orders = true; if (S.tab !== "admin") render();
-  }, () => {});
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2400); }
+function copyText(text, okMsg) {
+  const fallback = () => { const ta = $("#copy-fallback"); if (ta) { ta.hidden = false; ta.value = text; ta.select(); } toast("請長按選取文字後複製"); };
+  try { navigator.clipboard.writeText(text).then(() => toast(okMsg), fallback); } catch { fallback(); }
 }
 
 // ---------- helpers ----------
@@ -192,42 +177,67 @@ function grouped(items) {
   (items || []).forEach(it => { const c = it.category || "其他"; if (!g.has(c)) g.set(c, []); g.get(c).push(it); });
   return [...g.entries()];
 }
-function itemBase(it) { return it.variants && it.variants.length ? Math.min(...it.variants.map(v => +v.price || 0)) : (+it.price || 0); }
-function selTotal() {
-  const m = menuById(S.orderMenuId); const s = S.sel; if (!m || !s || !s.itemId) return 0;
-  const it = m.items.find(x => x.id === s.itemId); if (!it) return 0;
+const itemBase = it => it.variants && it.variants.length ? Math.min(...it.variants.map(v => +v.price || 0)) : (+it.price || 0);
+const clean = s => String(s || "").replace(/[｜|\n\r]/g, "/").trim();
+function selPrice(m, s) {
+  const it = m.items.find(x => x.id === s.itemId); if (!it) return { unit: 0, opts: [] };
   let unit = it.variants && it.variants.length ? (+(it.variants.find(v => v.name === s.variant) || it.variants[0]).price || 0) : (+it.price || 0);
-  (m.options || []).forEach(g => (s.opts[g.id] || []).forEach(cn => { const c = g.choices.find(x => x.name === cn); if (c) unit += +c.price || 0; }));
-  return { unit, total: unit * s.qty };
+  const opts = [];
+  (m.options || []).forEach(g => (s.opts[g.id] || []).forEach(cn => { const c = g.choices.find(x => x.name === cn); if (c) { unit += +c.price || 0; opts.push(c.name + (+c.price ? "+" + c.price : "")); } }));
+  return { unit, opts, it };
 }
-function optText(o) { return (o.opts || []).map(x => x.c + (x.p ? `(+${x.p})` : "")).join("、"); }
+const cartTotal = () => S.cart.reduce((a, c) => a + c.unit * c.qty, 0);
+function orderLines() {
+  const m = menuById(S.orderMenuId);
+  return S.cart.map(c => [MARK + clean(m.name), clean(S.name), clean(c.item) + (c.variant ? `（${clean(c.variant)}）` : ""), c.opts.length ? c.opts.map(clean).join("、") : "無", c.note ? "備註：" + clean(c.note) : "", "×" + c.qty, "$" + c.unit * c.qty].filter(Boolean).join("｜"));
+}
+
+// order-line parser for the tally tab
+function parseOrders(text) {
+  const out = [];
+  String(text || "").split(/\r?\n/).forEach(line => {
+    const i = line.indexOf(MARK); if (i < 0) return;
+    const parts = line.slice(i + MARK.length).replace(/["”]+\s*$/, "").split("｜").map(s => s.trim());
+    if (parts.length < 4) return;
+    const r = { menu: parts[0], name: parts[1], item: parts[2], variant: "", opts: "", note: "", qty: 1, total: 0 };
+    const vm = r.item.match(/^(.*)（(.+)）$/); if (vm) { r.item = vm[1]; r.variant = vm[2]; }
+    parts.slice(3).forEach(p => {
+      let m;
+      if ((m = p.match(/^[×xX*]\s*(\d+)/))) r.qty = +m[1];
+      else if ((m = p.match(/^(?:NT)?\$\s*(\d+)/))) r.total = +m[1];
+      else if (p.startsWith("備註：")) r.note = p.slice(3);
+      else if (p !== "無") r.opts = p;
+    });
+    out.push(r);
+  });
+  return out;
+}
+const rowKey = r => [r.menu, r.name, r.item, r.variant, r.opts, r.note, r.qty, r.total].join("|");
 
 // ---------- render ----------
 function render() {
-  document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === S.tab)));
+  const tabs = [["order", "點餐"]].concat(S.isOwner ? [["tally", "收單統計"], ["admin", "菜單管理"]] : []);
+  if (!tabs.find(t => t[0] === S.tab)) S.tab = "order";
+  $("#tabs").hidden = tabs.length < 2;
+  $("#tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${S.tab === k}">${l}</button>`).join("");
   const app = $("#app");
-  if (S.loadError) { app.innerHTML = `<div class="notice err">${esc(S.loadError)}</div>`; return; }
-  if (!S.loaded.menus) return;
   const ae = document.activeElement, keep = ae && ae.id;
   let sel = null; try { if (ae && ae.selectionStart != null) sel = [ae.selectionStart, ae.selectionEnd]; } catch {}
-  if (S.tab === "order") app.innerHTML = renderOrder();
-  else if (S.tab === "stats") app.innerHTML = renderStats();
-  else app.innerHTML = renderAdmin();
+  app.innerHTML = S.tab === "order" ? renderOrder() : S.tab === "tally" ? renderTally() : renderAdmin();
   if (keep) { const el = document.getElementById(keep); if (el && el.focus) { el.focus(); try { if (sel) el.setSelectionRange(sel[0], sel[1]); } catch {} } }
 }
 
 function renderOrder() {
   const menus = openMenus();
-  if (!menus.length) return `<div class="card empty"><h3>目前沒有開放點餐的菜單</h3><p>${S.isAdmin ? "到「菜單管理」上傳菜單照片，辨識完成後設為「開放點餐」。" : "等負責人開放菜單後，這裡就會出現可以點的餐點。"}</p>${S.isAdmin ? `<button class="btn primary" data-act="goto" data-tab="admin">前往菜單管理</button>` : ""}</div>`;
-  if (!menus.find(m => m.id === S.orderMenuId)) { S.orderMenuId = menus[0].id; S.sel = null; }
+  if (!menus.length) return `<div class="card empty"><h3>目前沒有開放點餐的菜單</h3><p>${S.isOwner ? "到「菜單管理」上傳菜單照片，辨識完成後設為「開放點餐」並儲存。" : "等負責人開放菜單後，重新整理這個頁面就能點餐。"}</p>${S.isOwner ? `<button class="btn primary" data-act="goto" data-tab="admin">前往菜單管理</button>` : ""}</div>`;
+  if (!menus.find(m => m.id === S.orderMenuId)) { S.orderMenuId = menus[0].id; S.sel = null; S.cart = []; S.sentText = ""; }
   const m = menuById(S.orderMenuId);
-  if (!S.sel) S.sel = { itemId: null, variant: null, opts: {}, qty: 1, note: "", name: store.get("tmjh-name") || "" };
+  if (!S.sel) S.sel = { itemId: null, variant: null, opts: {}, qty: 1, note: "" };
   const s = S.sel;
   const it = s.itemId ? m.items.find(x => x.id === s.itemId) : null;
-  const myOrders = S.orders.filter(o => o.menuId === m.id && (o.uid && o.uid === S.myId));
   let h = `<section class="stack">
-    <div class="row" style="justify-content:space-between"><h2>今天要吃什麼？</h2><span class="muted small">${menus.length} 份菜單開放中</span></div>
-    <div class="menu-switch">${menus.map(x => `<button data-act="pickmenu" data-id="${x.id}" aria-pressed="${x.id === m.id}">${esc(x.name || "未命名")}<span class="chip ${x.type === "drink" ? "gold" : ""}">${TYPE_LABEL[x.type] || "其他"}</span></button>`).join("")}</div>
+    <h2>今天要吃什麼？</h2>
+    ${menus.length > 1 ? `<div class="menu-switch">${menus.map(x => `<button data-act="pickmenu" data-id="${x.id}" aria-pressed="${x.id === m.id}">${esc(x.name || "未命名")}<span class="chip ${x.type === "drink" ? "gold" : ""}">${TYPE_LABEL[x.type] || "其他"}</span></button>`).join("")}</div>` : `<div class="row"><strong>${esc(m.name)}</strong><span class="chip ${m.type === "drink" ? "gold" : ""}">${TYPE_LABEL[m.type] || "其他"}</span></div>`}
     ${m.deadline ? `<p class="small muted">截止時間：${esc(m.deadline)}</p>` : ""}
     ${m.note ? `<div class="notice">${esc(m.note)}</div>` : ""}
   </section>
@@ -236,97 +246,102 @@ function renderOrder() {
     ${grouped(m.items).map(([cat, list]) => `<div class="stack" style="gap:6px"><div class="cat-title">${esc(cat)}</div><div class="items">${list.map(x => `<button class="item" data-act="pickitem" data-id="${x.id}" aria-pressed="${x.id === s.itemId}"><span>${esc(x.name)}</span><span class="price">${x.variants && x.variants.length > 1 ? money(itemBase(x)) + " 起" : money(itemBase(x))}</span></button>`).join("")}</div></div>`).join("") || `<p class="muted">這份菜單還沒有品項。</p>`}
   </section>`;
   if (it) {
-    const t = selTotal();
-    h += `<section class="card">
+    const p = selPrice(m, s);
+    h += `<section class="card" id="custom">
       <h3>2. 客製與升級 <span class="muted small">— ${esc(it.name)}</span></h3>
       ${it.variants && it.variants.length ? `<fieldset class="opt-group"><legend>尺寸／規格</legend><div class="opts">${it.variants.map(v => `<label class="opt"><input type="radio" name="variant" value="${esc(v.name)}" data-act="variant" ${s.variant === v.name ? "checked" : ""}><span>${esc(v.name)} <small>${money(v.price)}</small></span></label>`).join("")}</div></fieldset>` : ""}
       ${(m.options || []).map(g => `<fieldset class="opt-group"><legend>${esc(g.name)} ${g.required ? `<span class="chip gold">必選</span>` : ""} ${g.multi ? `<span class="chip">可複選</span>` : ""}</legend><div class="opts">${g.choices.map(c => `<label class="opt"><input type="${g.multi ? "checkbox" : "radio"}" name="g-${g.id}" value="${esc(c.name)}" data-act="opt" data-g="${g.id}" ${(s.opts[g.id] || []).includes(c.name) ? "checked" : ""}><span>${esc(c.name)}${+c.price ? ` <small>+${c.price}</small>` : ""}</span></label>`).join("")}</div></fieldset>`).join("")}
       <label class="f">備註<input id="o-note" type="text" data-act="note" value="${esc(s.note)}" placeholder="例如：不要香菜、飯分開裝"></label>
-    </section>
-    <section class="card">
-      <h3>3. 確認送出</h3>
-      <div class="row">
-        <label class="f" style="flex:1 1 200px">訂購人（姓名或座號）<input id="o-name" type="text" data-act="name" value="${esc(s.name)}" placeholder="例如：12 王小明"></label>
+      <div class="total-bar">
         <div class="f"><span>數量</span><span class="qty"><button data-act="qty" data-d="-1" aria-label="減少">−</button><input id="o-qty" type="number" min="1" value="${s.qty}" data-act="qtyset"><button data-act="qty" data-d="1" aria-label="增加">＋</button></span></div>
+        <div class="row"><span class="price" id="o-total">${money(p.unit * s.qty)}</span><button class="btn primary" data-act="addcart">加入清單</button></div>
       </div>
-      <div class="total-bar"><div><span class="muted small">單價 ${money(t.unit)} × ${s.qty}</span><div class="price" id="o-total">${money(t.total)}</div></div><button class="btn primary" data-act="submit" id="o-submit">送出訂單</button></div>
     </section>`;
   }
-  if (myOrders.length) {
-    h += `<section class="card"><h3>我在這份菜單的訂單</h3><div class="tbl-wrap"><table><thead><tr><th>訂購人</th><th>品項</th><th>選項</th><th class="num">金額</th><th></th></tr></thead><tbody>
-    ${myOrders.map(o => `<tr><td>${esc(o.name)}</td><td>${esc(o.item)}${o.variant ? `（${esc(o.variant)}）` : ""} ×${o.qty}</td><td class="small">${esc(optText(o))}${o.note ? `<br><span class="muted">備註：${esc(o.note)}</span>` : ""}</td><td class="num price">${money(o.total)}</td><td>${delBtn(o.id)}</td></tr>`).join("")}
-    </tbody></table></div></section>`;
+  if (S.cart.length || S.sentText) {
+    h += `<section class="card" id="cart">
+      <h3>3. 我的訂單</h3>
+      ${S.cart.length ? `<div class="tbl-wrap"><table><tbody>${S.cart.map((c, i) => `<tr><td>${esc(c.item)}${c.variant ? `（${esc(c.variant)}）` : ""} ×${c.qty}<div class="small muted">${esc(c.opts.join("、"))}${c.note ? `${c.opts.length ? "・" : ""}備註：${esc(c.note)}` : ""}</div></td><td class="num price">${money(c.unit * c.qty)}</td><td><button class="btn sm ghost" data-act="delcart" data-i="${i}" aria-label="移除">✕</button></td></tr>`).join("")}</tbody>
+      <tfoot><tr><td>合計</td><td class="num">${money(cartTotal())}</td><td></td></tr></tfoot></table></div>
+      <label class="f">訂購人（姓名或座號）<input id="o-name" type="text" data-act="name" value="${esc(S.name)}" placeholder="例如：12 王小明"></label>
+      <div class="row"><button class="btn primary" data-act="sendline">用 LINE 傳到群組</button><button class="btn" data-act="copyorder">複製訂單文字</button></div>
+      <p class="small muted">送出方式：把訂單傳到班級 LINE 群組（或負責人指定的地方），負責人收到才算訂好。</p>` : ""}
+      ${S.sentText ? `<div class="notice">訂單文字已準備好。如果 LINE 沒有自動打開，請按「複製訂單文字」後貼到群組。<pre class="order-pre">${esc(S.sentText)}</pre><button class="btn sm" data-act="newcart">再點一份新的</button></div>` : ""}
+      <textarea id="copy-fallback" rows="4" hidden readonly></textarea>
+    </section>`;
   }
   return h;
 }
 
-function delBtn(id) {
-  if (S.confirmDel === id) return `<span class="confirm"><button class="btn sm danger" data-act="delorder" data-id="${id}">確定刪除</button><button class="btn sm ghost" data-act="canceldel">取消</button></span>`;
-  return `<button class="btn sm ghost" data-act="askdel" data-id="${id}">刪除</button>`;
+function aggregate(rows) {
+  const agg = new Map(), people = new Map();
+  rows.forEach(o => {
+    const k = [o.item, o.variant, o.opts, o.note].join("|");
+    const a = agg.get(k) || { ...o, qty: 0, sum: 0 }; a.qty += o.qty; a.sum += o.total; agg.set(k, a);
+    const p = people.get(o.name) || { qty: 0, sum: 0 }; p.qty += o.qty; p.sum += o.total; people.set(o.name, p);
+  });
+  return { agg: [...agg.values()], people: [...people.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh-Hant", { numeric: true })) };
 }
 
-function renderStats() {
-  if (!S.menus.length) return `<div class="card empty"><h3>還沒有任何菜單</h3><p>建立菜單並開始點餐後，這裡會統計每樣餐點的數量與總金額。</p></div>`;
-  if (!menuById(S.statsMenuId)) S.statsMenuId = (openMenus()[0] || S.menus[0]).id;
-  const m = menuById(S.statsMenuId);
-  const os = S.orders.filter(o => o.menuId === m.id);
-  const agg = new Map();
-  os.forEach(o => { const k = [o.item, o.variant || "", optText(o), o.note || ""].join("|"); const a = agg.get(k) || { item: o.item, variant: o.variant, opts: optText(o), note: o.note, qty: 0, sum: 0 }; a.qty += o.qty; a.sum += o.total; agg.set(k, a); });
-  const people = new Map();
-  os.forEach(o => { const p = people.get(o.name) || { qty: 0, sum: 0 }; p.qty += o.qty; p.sum += o.total; people.set(o.name, p); });
-  const totalQty = os.reduce((s, o) => s + o.qty, 0), totalSum = os.reduce((s, o) => s + o.total, 0);
-  return `<section class="stack">
-    <div class="row" style="justify-content:space-between"><h2>訂單統計</h2>
-      <select id="stats-menu" data-act="statsmenu">${S.menus.map(x => `<option value="${x.id}" ${x.id === m.id ? "selected" : ""}>${esc(x.name || "未命名")}（${TYPE_LABEL[x.type] || "其他"}${x.open ? "・開放中" : ""}）</option>`).join("")}</select>
-    </div>
-    <div class="row"><span class="chip">${os.length} 筆訂單</span><span class="chip">共 ${totalQty} 份</span><span class="chip open">總金額 ${money(totalSum)}</span></div>
+function renderTally() {
+  const menuNames = [...new Set(S.tally.map(r => r.menu))];
+  if (!menuNames.includes(S.tallyMenu)) S.tallyMenu = menuNames[0] || "";
+  const rows = S.tally.filter(r => r.menu === S.tallyMenu);
+  const { agg, people } = aggregate(rows);
+  const totalQty = rows.reduce((s, o) => s + o.qty, 0), totalSum = rows.reduce((s, o) => s + o.total, 0);
+  return `<section class="card">
+    <h3>貼上 LINE 群組裡的訂單</h3>
+    <p class="muted small">在 LINE 群組長按訂單訊息 → 複製，貼到下面（可以一次貼很多則，聊天的其他內容會自動略過）。也可以用 LINE 的「傳送聊天記錄」整段貼上。</p>
+    <textarea id="tally-paste" rows="5" placeholder="${MARK}…｜王小明｜紅茶（L）｜半糖、少冰｜×1｜$40"></textarea>
+    <div class="row"><button class="btn primary" data-act="addtally">加入統計</button>${S.tally.length ? (S.confirmDel === "tally" ? `<span class="confirm"><button class="btn danger" data-act="cleartally">確定清空</button><button class="btn ghost" data-act="canceldel">取消</button></span>` : `<button class="btn ghost" data-act="askcleartally">清空統計</button>`) : ""}</div>
+    ${S.pasteMsg ? `<div class="notice">${esc(S.pasteMsg)}</div>` : ""}
+    <p class="small muted">統計資料只存在這台裝置的瀏覽器裡。</p>
   </section>
-  ${os.length ? `
-  <section class="card"><div class="row" style="justify-content:space-between"><h3>叫餐清單</h3><button class="btn sm" data-act="copy">複製給店家</button></div>
+  ${!S.tally.length ? `<div class="card empty"><p>還沒有訂單。大家送出的訂單會出現在 LINE 群組，複製貼到上面就會自動算好。</p></div>` : `
+  <section class="stack">
+    ${menuNames.length > 1 ? `<label class="f">菜單<select id="tally-menu" data-act="tallymenu">${menuNames.map(n => `<option ${n === S.tallyMenu ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>` : `<h2>${esc(S.tallyMenu)}</h2>`}
+    <div class="row"><span class="chip">${rows.length} 筆</span><span class="chip">共 ${totalQty} 份</span><span class="chip open">總金額 ${money(totalSum)}</span></div>
+  </section>
+  <section class="card"><div class="row" style="justify-content:space-between"><h3>叫餐清單</h3><button class="btn sm" data-act="copystore">複製給店家</button></div>
     <div class="tbl-wrap"><table><thead><tr><th>品項</th><th>選項／備註</th><th class="num">數量</th><th class="num">小計</th></tr></thead><tbody>
-    ${[...agg.values()].map(a => `<tr><td>${esc(a.item)}${a.variant ? `（${esc(a.variant)}）` : ""}</td><td class="small">${esc(a.opts) || "—"}${a.note ? `<br><span class="muted">備註：${esc(a.note)}</span>` : ""}</td><td class="num">${a.qty}</td><td class="num">${money(a.sum)}</td></tr>`).join("")}
+    ${agg.map(a => `<tr><td>${esc(a.item)}${a.variant ? `（${esc(a.variant)}）` : ""}</td><td class="small">${esc(a.opts) || "—"}${a.note ? `<br><span class="muted">備註：${esc(a.note)}</span>` : ""}</td><td class="num">${a.qty}</td><td class="num">${money(a.sum)}</td></tr>`).join("")}
     </tbody><tfoot><tr><td colspan="2">合計</td><td class="num">${totalQty}</td><td class="num">${money(totalSum)}</td></tr></tfoot></table></div></section>
-  <section class="card"><h3>收款明細（依訂購人）</h3>
+  <section class="card"><h3>收款明細</h3>
     <div class="tbl-wrap"><table><thead><tr><th>訂購人</th><th class="num">份數</th><th class="num">應付</th></tr></thead><tbody>
-    ${[...people.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh-Hant", { numeric: true })).map(([n, p]) => `<tr><td>${esc(n)}</td><td class="num">${p.qty}</td><td class="num price">${money(p.sum)}</td></tr>`).join("")}
+    ${people.map(([n, p]) => `<tr><td>${esc(n)}</td><td class="num">${p.qty}</td><td class="num price">${money(p.sum)}</td></tr>`).join("")}
     </tbody></table></div></section>
   <section class="card"><h3>全部訂單</h3>
-    <div class="tbl-wrap"><table><thead><tr><th>訂購人</th><th>品項</th><th>選項</th><th class="num">金額</th><th></th></tr></thead><tbody>
-    ${os.map(o => `<tr><td>${esc(o.name)}</td><td>${esc(o.item)}${o.variant ? `（${esc(o.variant)}）` : ""} ×${o.qty}</td><td class="small">${esc(optText(o))}${o.note ? `<br><span class="muted">備註：${esc(o.note)}</span>` : ""}</td><td class="num">${money(o.total)}</td><td>${(S.isAdmin || o.uid === S.myId) ? delBtn(o.id) : ""}</td></tr>`).join("")}
-    </tbody></table></div></section>` : `<div class="card empty"><p>這份菜單還沒有人點餐。</p></div>`}`;
+    <div class="tbl-wrap"><table><tbody>
+    ${rows.map(o => { const gi = S.tally.indexOf(o); return `<tr><td>${esc(o.name)}</td><td>${esc(o.item)}${o.variant ? `（${esc(o.variant)}）` : ""} ×${o.qty}<div class="small muted">${esc(o.opts)}${o.note ? ` 備註：${esc(o.note)}` : ""}</div></td><td class="num">${money(o.total)}</td><td><button class="btn sm ghost" data-act="deltally" data-i="${gi}" aria-label="刪除這筆">✕</button></td></tr>`; }).join("")}
+    </tbody></table></div></section>`}
+  <textarea id="copy-fallback" rows="4" hidden readonly></textarea>`;
 }
 
 function renderAdmin() {
-  if (!S.isAdmin) return `<div class="notice">只有這個頁面的編輯者可以管理菜單。</div>`;
   if (S.draft) return renderEditor();
-  const canAI = !!S.sample;
   return `<section class="card">
     <h3>上傳菜單，自動辨識</h3>
-    <p class="muted small">拍下或掃描店家的紙本菜單（可一次選多張）。辨識後會產生品項與價格，並附上預設的升級選項，你可以再修改。</p>
-    <label class="drop" id="drop" for="menu-files">
-      <strong>點這裡選擇菜單照片</strong><span class="muted small">或把圖片拖曳到這裡　·　JPG / PNG</span>
-    </label>
+    <p class="muted small">拍下店家的紙本菜單（可一次選多張）。Claude 會讀出品項和價格，並附上預設的升級選項，你可以再修改。</p>
+    <label class="drop" id="drop" for="menu-files"><strong>點這裡拍照或選擇菜單照片</strong><span class="muted small">JPG / PNG，可多張</span></label>
     <input id="menu-files" type="file" accept="image/*" multiple hidden data-act="files">
     ${S.files.length ? `<div class="thumbs">${S.files.map(f => `<img src="${f.url}" alt="菜單照片">`).join("")}</div>` : ""}
     <div class="row">
       <label class="f">類型<select id="ai-type"><option value="auto">自動判斷</option><option value="bento">便當</option><option value="drink">飲料</option></select></label>
-      <button class="btn primary" data-act="recognize" ${!S.files.length || S.recognizing || !canAI ? "disabled" : ""}>${S.recognizing ? `<span class="spin"></span>辨識中…` : "開始辨識"}</button>
+      <button class="btn primary" data-act="recognize" ${!S.files.length || S.recognizing || !S.sample ? "disabled" : ""}>${S.recognizing ? `<span class="spin"></span>辨識中…` : "開始辨識"}</button>
       ${S.files.length ? `<button class="btn ghost" data-act="clearfiles">清除照片</button>` : ""}
     </div>
-    ${!canAI ? `<div class="notice">此環境無法使用自動辨識，請改用下方「手動建立」。</div>` : ""}
+    ${!S.sample ? `<div class="notice">這個畫面無法使用自動辨識（請在 claude.ai 登入後開啟），可以先手動建立。</div>` : ""}
     ${S.recogError ? `<div class="notice err">${esc(S.recogError)}</div>` : ""}
     <div class="row muted small">沒有照片？<button class="btn sm" data-act="newmenu" data-type="bento">手動建立便當菜單</button><button class="btn sm" data-act="newmenu" data-type="drink">手動建立飲料菜單</button></div>
   </section>
   <section class="stack">
     <h3>已建立的菜單</h3>
-    ${S.menus.length ? S.menus.map(m => {
-      const cnt = S.orders.filter(o => o.menuId === m.id).length;
-      return `<div class="card"><div class="row" style="justify-content:space-between">
+    <p class="small muted">設為「開放點餐」的菜單，大家打開分享連結就看得到。</p>
+    ${S.menus.length ? S.menus.map(m => `<div class="card"><div class="row" style="justify-content:space-between">
         <div class="row"><strong>${esc(m.name || "未命名")}</strong><span class="chip ${m.type === "drink" ? "gold" : ""}">${TYPE_LABEL[m.type] || "其他"}</span><span class="chip ${m.open ? "open" : "closed"}">${m.open ? "開放點餐" : "已關閉"}</span></div>
-        <div class="row"><span class="muted small">${(m.items || []).length} 個品項・${cnt} 筆訂單</span>
-          <button class="btn sm" data-act="toggleopen" data-id="${m.id}">${m.open ? "關閉點餐" : "開放點餐"}</button>
-          <button class="btn sm primary" data-act="editmenu" data-id="${m.id}">編輯</button></div></div></div>`;
-    }).join("") : `<p class="muted">還沒有菜單。上傳一張照片試試看。</p>`}
+        <div class="row"><span class="muted small">${(m.items || []).length} 個品項</span>
+          <button class="btn sm" data-act="toggleopen" data-id="${m.id}" ${S.saving ? "disabled" : ""}>${m.open ? "關閉點餐" : "開放點餐"}</button>
+          <button class="btn sm primary" data-act="editmenu" data-id="${m.id}">編輯</button></div></div></div>`).join("") : `<p class="muted">還沒有菜單。拍一張菜單照片試試看。</p>`}
   </section>`;
 }
 
@@ -334,7 +349,7 @@ function renderEditor() {
   const d = S.draft;
   return `<section class="stack">
     <div class="row" style="justify-content:space-between"><h2>${d.id ? "編輯菜單" : "確認辨識結果"}</h2>
-      <div class="row"><button class="btn" data-act="canceledit">返回</button><button class="btn primary" data-act="savemenu">儲存菜單</button></div></div>
+      <div class="row"><button class="btn" data-act="canceledit">返回</button><button class="btn primary" data-act="savemenu" ${S.saving ? "disabled" : ""}>儲存菜單</button></div></div>
     ${d.aiNote ? `<div class="notice">${esc(d.aiNote)}</div>` : ""}
   </section>
   <section class="card">
@@ -344,20 +359,19 @@ function renderEditor() {
       <label class="f" style="flex:1 1 160px">截止時間<input id="d-deadline" type="text" data-bind="deadline" value="${esc(d.deadline)}" placeholder="例如：週五 10:30"></label>
     </div>
     <label class="f">給點餐者的說明（選填）<input id="d-note" type="text" data-bind="note" value="${esc(d.note)}" placeholder="例如：中午 12:10 到教室門口取餐"></label>
-    <label class="row small"><input id="d-open" type="checkbox" data-bind="open" ${d.open ? "checked" : ""}> 儲存後立即開放點餐</label>
+    <label class="row small"><input id="d-open" type="checkbox" data-bind="open" ${d.open ? "checked" : ""}> 開放點餐</label>
   </section>
   <section class="card">
     <div class="row" style="justify-content:space-between"><h3>品項與價格</h3><button class="btn sm" data-act="additem">新增品項</button></div>
     <p class="muted small">「規格」可填多種尺寸價格，格式如 <code>M:40, L:50</code>；有填規格時以規格價為準。</p>
-    <div class="tbl-wrap"><table class="edit-tbl"><thead><tr><th style="width:24%">分類</th><th>品名</th><th style="width:90px">價格</th><th style="width:22%">規格（選填）</th><th></th></tr></thead><tbody>
+    <div class="tbl-wrap"><table class="edit-tbl"><thead><tr><th style="width:24%">分類</th><th>品名</th><th style="width:80px">價格</th><th style="width:22%">規格</th><th></th></tr></thead><tbody>
     ${d.items.map((it, i) => `<tr>
       <td><input id="i-cat-${it.id}" type="text" data-item="${i}" data-f="category" value="${esc(it.category)}"></td>
       <td><input id="i-name-${it.id}" type="text" data-item="${i}" data-f="name" value="${esc(it.name)}"></td>
-      <td><input id="i-price-${it.id}" type="number" min="0" data-item="${i}" data-f="price" value="${esc(it.price)}"></td>
+      <td><input id="i-price-${it.id}" type="number" min="0" inputmode="numeric" data-item="${i}" data-f="price" value="${esc(it.price)}"></td>
       <td><input id="i-var-${it.id}" type="text" data-item="${i}" data-f="variantsText" value="${esc(it.variantsText)}" placeholder="M:40, L:50"></td>
       <td><button class="btn sm ghost" data-act="delitem" data-i="${i}" aria-label="刪除品項">✕</button></td></tr>`).join("")}
     </tbody></table></div>
-    ${!d.items.length ? `<p class="muted small">還沒有品項，按「新增品項」開始。</p>` : ""}
   </section>
   <section class="card">
     <div class="row" style="justify-content:space-between"><h3>升級與客製選項</h3>
@@ -372,14 +386,14 @@ function renderEditor() {
       </div>
       ${g.choices.map((c, ci) => `<div class="choice-row">
         <input id="c-name-${g.id}-${ci}" type="text" data-g="${gi}" data-c="${ci}" data-f="name" value="${esc(c.name)}" placeholder="選項名稱">
-        <input id="c-price-${g.id}-${ci}" type="number" data-g="${gi}" data-c="${ci}" data-f="price" value="${esc(c.price)}" placeholder="加價" aria-label="加價">
+        <input id="c-price-${g.id}-${ci}" type="number" inputmode="numeric" data-g="${gi}" data-c="${ci}" data-f="price" value="${esc(c.price)}" placeholder="加價" aria-label="加價">
         <button class="btn sm ghost" data-act="delchoice" data-gi="${gi}" data-ci="${ci}" aria-label="刪除選項">✕</button></div>`).join("")}
       <div><button class="btn sm" data-act="addchoice" data-gi="${gi}">＋ 新增選項</button></div>
     </div>`).join("")}
   </section>
   <section class="row" style="justify-content:space-between">
-    ${d.id ? (S.confirmDel === "menu" ? `<span class="confirm"><span class="small">刪除菜單會一併刪除 ${S.orders.filter(o => o.menuId === d.id).length} 筆訂單。</span><button class="btn danger" data-act="delmenu">確定刪除</button><button class="btn ghost" data-act="canceldel">取消</button></span>` : `<button class="btn danger" data-act="askdelmenu">刪除這份菜單</button>`) : "<span></span>"}
-    <button class="btn primary" data-act="savemenu">儲存菜單</button>
+    ${d.id ? (S.confirmDel === "menu" ? `<span class="confirm"><button class="btn danger" data-act="delmenu">確定刪除菜單</button><button class="btn ghost" data-act="canceldel">取消</button></span>` : `<button class="btn danger" data-act="askdelmenu">刪除這份菜單</button>`) : "<span></span>"}
+    <button class="btn primary" data-act="savemenu" ${S.saving ? "disabled" : ""}>儲存菜單</button>
   </section>`;
 }
 
@@ -395,21 +409,42 @@ function toDraft(m) {
     options: (m.options || []).map(g => ({ id: g.id || uid(), name: g.name || "", multi: !!g.multi, required: !!g.required, choices: (g.choices || []).map(c => ({ name: c.name || "", price: +c.price || 0 })) })) };
 }
 function fromDraft(d) {
-  return { name: d.name.trim() || "未命名菜單", type: d.type, deadline: d.deadline.trim(), note: d.note.trim(), open: d.open,
+  return { id: d.id || uid(), name: d.name.trim() || "未命名菜單", type: d.type, deadline: d.deadline.trim(), note: d.note.trim(), open: d.open,
     items: d.items.filter(it => it.name.trim()).map(it => { const v = parseVariants(it.variantsText); return { id: it.id, category: it.category.trim(), name: it.name.trim(), price: +it.price || (v[0] ? v[0].price : 0), variants: v }; }),
     options: d.options.filter(g => g.name.trim()).map(g => ({ id: g.id, name: g.name.trim(), multi: g.multi, required: g.required, choices: g.choices.filter(c => c.name.trim()).map(c => ({ name: c.name.trim(), price: +c.price || 0 })) })).filter(g => g.choices.length) };
 }
 
-// ---------- image + recognition ----------
-function addFiles(list) {
-  [...list].filter(f => f.type.startsWith("image/")).forEach(f => S.files.push({ file: f, url: URL.createObjectURL(f) }));
-  S.recogError = ""; render();
+// ---------- saving: the page republishes itself with the menus inside ----------
+function buildDoc(menus) {
+  const data = JSON.stringify({ menus }).replace(/</g, "\\u003c");
+  return '<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>' + RESET + '</style></head><body>'
+    + '<title>TMJH 訂餐站</title>\n<meta name="claude:viewport-fit-sides" content="cover">\n' + FONTS
+    + '<style id="tmjh-style">' + document.getElementById("tmjh-style").textContent + '</style>\n'
+    + '<div id="tmjh-root"></div>\n'
+    + '<script type="application/json" id="tmjh-data">' + data + '<\/script>\n'
+    + '<script id="tmjh-app">' + document.getElementById("tmjh-app").textContent + '<\/script>'
+    + '</body></html>';
 }
+async function persist(menus, okMsg) {
+  if (!S.artifact) { toast("無法儲存：請在 claude.ai 登入後開啟這個頁面"); return false; }
+  S.saving = true; render();
+  try {
+    await S.artifact.publish(buildDoc(menus));
+    S.menus = menus; toast(okMsg); S.saving = false; return true;
+  } catch (e) {
+    S.saving = false; render();
+    toast(e && e.code === "conflict" ? "頁面剛被更新，請重新操作一次" : "儲存失敗：" + ((e && (e.message || e.code)) || "請再試一次"));
+    return false;
+  }
+}
+
+// ---------- recognition (uses the owner's claude.ai account, no API key) ----------
+function addFiles(list) { [...list].filter(f => f.type.startsWith("image/")).forEach(f => S.files.push({ file: f, url: URL.createObjectURL(f) })); S.recogError = ""; render(); }
 function shrink(file) {
-  return new Promise((res) => {
+  return new Promise(res => {
     const img = new Image();
     img.onload = () => {
-      const max = 1800, k = Math.min(1, max / Math.max(img.width, img.height));
+      const k = Math.min(1, 1800 / Math.max(img.width, img.height));
       const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
       c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
       c.toBlob(b => res(b || file), "image/jpeg", 0.85);
@@ -423,14 +458,12 @@ async function recognize() {
   const forced = $("#ai-type").value;
   S.recognizing = true; S.recogError = ""; render();
   try {
-    const lim = await S.sample.limits().catch(() => ({}));
-    if (lim && lim.images === false) throw { message: "這個環境無法傳送圖片給 Claude，請改用手動建立。" };
     const blobs = await Promise.all(S.files.map(f => shrink(f.file)));
     const prompt = `你是台灣餐飲菜單辨識助手。請閱讀附上的菜單照片（可能多張，屬於同一家店），把所有可點的品項整理成 JSON。
 規則：
 - 只輸出 JSON，不要任何說明文字。
 - 價格用新台幣整數。看不清楚的價格填 0。
-- 如果同一品項有多種尺寸／價格（例如中杯 M、大杯 L，或小/大份），放在 variants 陣列，price 填最低價。
+- 同一品項有多種尺寸／價格（例如中杯 M、大杯 L，或小/大份）時，放在 variants 陣列，price 填最低價；只有一種價格時 variants 給空陣列。
 - category 用菜單上的分類（例如：招牌便當、炸物、茶類、奶茶、鮮奶），沒有分類就填「主餐」或「飲品」。
 - addons：菜單上明確列出的加購／加料／升級項目（例如：加珍珠 +10、加蛋 +10、升級套餐 +30），沒有就給空陣列。
 - type：便當／餐點類填 "bento"，飲料店填 "drink"。${forced !== "auto" ? `本菜單已確定是 "${forced}"。` : ""}
@@ -438,92 +471,100 @@ async function recognize() {
 格式：
 {"store":"","type":"bento","items":[{"category":"","name":"","price":0,"variants":[{"name":"M","price":0}]}],"addons":[{"group":"加料","name":"珍珠","price":10}]}`;
     const r = await S.sample.json(prompt, { images: blobs, modelTier: "complex", cache: false });
-    if (!r || !Array.isArray(r.items)) throw { message: "沒有辨識到品項，請換一張更清楚、正面拍攝的照片再試一次。" };
+    if (!r || !Array.isArray(r.items) || !r.items.length) throw { message: "沒有辨識到品項，請換一張更清楚、正面拍攝的照片再試一次。" };
     const type = forced !== "auto" ? forced : (r.type === "drink" ? "drink" : "bento");
     const options = cloneDefaults(type);
     const addons = Array.isArray(r.addons) ? r.addons.filter(a => a && a.name) : [];
-    if (addons.length) {
-      const byGroup = new Map();
-      addons.forEach(a => { const g = (a.group || "加購").trim(); if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push({ name: String(a.name).trim(), price: +a.price || 0 }); });
-      byGroup.forEach((choices, name) => {
-        const ex = options.find(o => o.name === name);
-        if (ex) ex.choices = choices; else options.push({ id: uid(), name: "店家" + (name.startsWith("加") || name.includes("升級") ? "" : "加購・") + name, multi: true, required: false, choices });
-      });
-    }
+    const byGroup = new Map();
+    addons.forEach(a => { const g = String(a.group || "加購").trim(); if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push({ name: String(a.name).trim(), price: +a.price || 0 }); });
+    byGroup.forEach((choices, name) => {
+      const ex = options.find(o => o.name === name);
+      if (ex) ex.choices = choices; else options.push({ id: uid(), name: "店家" + (name.startsWith("加") || name.includes("升級") ? "" : "加購・") + name, multi: true, required: false, choices });
+    });
     S.draft = toDraft({ name: r.store || "", type, open: true, options,
       items: r.items.filter(i => i && i.name).map(i => ({ category: i.category, name: i.name, price: +i.price || 0, variants: Array.isArray(i.variants) ? i.variants.filter(v => v && v.name).map(v => ({ name: String(v.name), price: +v.price || 0 })) : [] })),
-      aiNote: `辨識出 ${r.items.length} 個品項${addons.length ? `、${addons.length} 個店家加購項目` : ""}。請核對品名與價格，並調整下方的升級選項後再儲存。` });
+      aiNote: `辨識出 ${r.items.length} 個品項${addons.length ? `、${addons.length} 個店家加購項目` : ""}。請核對品名與價格，調整升級選項後按「儲存菜單」。` });
     S.files.forEach(f => URL.revokeObjectURL(f.url)); S.files = [];
   } catch (e) {
-    S.recogError = e && e.code === "not_granted" ? "你沒有允許此頁使用 Claude 辨識，可改用手動建立。" : e && e.code === "rate_limited" ? "辨識次數太頻繁，請稍等一分鐘再試。" : "辨識失敗：" + ((e && e.message) || "請再試一次");
+    S.recogError = e && e.code === "not_granted" ? "沒有允許這個頁面使用 Claude，可以改用手動建立。" : e && e.code === "rate_limited" ? "辨識次數太頻繁，請稍等一分鐘再試。" : "辨識失敗：" + ((e && e.message) || "請再試一次");
   }
   S.recognizing = false; render();
 }
 
-// ---------- actions ----------
-async function submitOrder() {
-  const m = menuById(S.orderMenuId), s = S.sel;
-  const it = m.items.find(x => x.id === s.itemId);
-  if (!s.name.trim()) { toast("請填寫訂購人"); $("#o-name") && $("#o-name").focus(); return; }
-  if (it.variants && it.variants.length && !s.variant) { toast("請選擇尺寸／規格"); return; }
-  for (const g of m.options || []) if (g.required && !(s.opts[g.id] || []).length) { toast(`請選擇「${g.name}」`); return; }
-  const opts = [];
-  (m.options || []).forEach(g => (s.opts[g.id] || []).forEach(cn => { const c = g.choices.find(x => x.name === cn); if (c) opts.push({ g: g.name, c: c.name, p: +c.price || 0 }); }));
-  const t = selTotal();
-  const btn = $("#o-submit"); if (btn) btn.disabled = true;
-  try {
-    await S.db.collection("orders").add({ menuId: m.id, menuName: m.name, name: s.name.trim(), uid: S.myId || "", item: it.name, variant: s.variant || "", opts, qty: s.qty, note: s.note.trim(), unit: t.unit, total: t.total, at: Date.now() });
-    store.set("tmjh-name", s.name.trim());
-    S.sel = { itemId: null, variant: null, opts: {}, qty: 1, note: "", name: s.name };
-    toast("已送出訂單"); render();
-  } catch (e) { if (btn) btn.disabled = false; toast(e && e.code === "not_granted" ? "你沒有點餐權限，請請負責人把你加為參與者" : "送出失敗，請再試一次"); }
-}
-async function saveMenu() {
-  const data = fromDraft(S.draft);
-  if (!data.items.length) { toast("至少需要一個品項"); return; }
-  try {
-    if (S.draft.id) await S.db.doc("menus/" + S.draft.id).update(data);
-    else await S.db.collection("menus").add({ ...data, createdAt: Date.now() });
-    S.draft = null; S.confirmDel = null; toast("已儲存菜單"); render();
-  } catch (e) { toast("儲存失敗：" + ((e && e.message) || "")); }
-}
-function copyList() {
-  const m = menuById(S.statsMenuId); const os = S.orders.filter(o => o.menuId === m.id);
-  const agg = new Map();
-  os.forEach(o => { const k = `${o.item}${o.variant ? `（${o.variant}）` : ""}${optText(o) ? ` ${optText(o)}` : ""}${o.note ? ` [${o.note}]` : ""}`; agg.set(k, (agg.get(k) || 0) + o.qty); });
-  const total = os.reduce((s, o) => s + o.total, 0);
-  const text = `【${m.name}】訂購清單\n` + [...agg.entries()].map(([k, q]) => `${k} × ${q}`).join("\n") + `\n共 ${os.reduce((s, o) => s + o.qty, 0)} 份，總金額 ${money(total)}`;
-  navigator.clipboard.writeText(text).then(() => toast("已複製叫餐清單"), () => toast("無法自動複製，請手動選取表格文字"));
-}
+// ---------- events ----------
+function scrollToId(id) { requestAnimationFrame(() => { const el = document.getElementById(id); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); }); }
 
 document.addEventListener("click", async e => {
-  const tab = e.target.closest("nav.tabs button");
-  if (tab) { S.tab = tab.dataset.tab; S.confirmDel = null; render(); return; }
+  const tab = e.target.closest("#tabs button");
+  if (tab) { S.tab = tab.dataset.tab; S.confirmDel = null; render(); window.scrollTo(0, 0); return; }
   const b = e.target.closest("[data-act]"); if (!b || b.tagName === "INPUT" || b.tagName === "SELECT") return;
   const a = b.dataset.act, d = S.draft;
   switch (a) {
     case "goto": S.tab = b.dataset.tab; break;
-    case "pickmenu": S.orderMenuId = b.dataset.id; S.sel = null; break;
+    case "pickmenu": S.orderMenuId = b.dataset.id; S.sel = null; S.cart = []; S.sentText = ""; break;
     case "pickitem": {
       const m = menuById(S.orderMenuId), it = m.items.find(x => x.id === b.dataset.id);
-      S.sel.itemId = it.id; S.sel.variant = it.variants && it.variants.length === 1 ? it.variants[0].name : null;
-      // preselect first choice of required single groups
-      S.sel.opts = {}; (m.options || []).forEach(g => { if (g.required && !g.multi && g.choices[0]) S.sel.opts[g.id] = [g.choices[0].name]; });
-      S.sel.qty = 1; S.sel.note = ""; break;
+      S.sel = { itemId: it.id, variant: it.variants && it.variants.length === 1 ? it.variants[0].name : null, opts: {}, qty: 1, note: "" };
+      (m.options || []).forEach(g => { if (g.required && !g.multi && g.choices[0]) S.sel.opts[g.id] = [g.choices[0].name]; });
+      render(); scrollToId("custom"); return;
     }
     case "qty": S.sel.qty = Math.max(1, S.sel.qty + +b.dataset.d); break;
-    case "submit": return submitOrder();
-    case "askdel": S.confirmDel = b.dataset.id; break;
-    case "canceldel": S.confirmDel = null; break;
-    case "delorder": try { await S.db.doc("orders/" + b.dataset.id).delete(); toast("已刪除"); } catch { toast("刪除失敗"); } S.confirmDel = null; break;
-    case "copy": return copyList();
+    case "addcart": {
+      const m = menuById(S.orderMenuId), s = S.sel, p = selPrice(m, s);
+      if (p.it.variants && p.it.variants.length && !s.variant) { toast("請選擇尺寸／規格"); return; }
+      for (const g of m.options || []) if (g.required && !(s.opts[g.id] || []).length) { toast(`請選擇「${g.name}」`); return; }
+      const c = { item: p.it.name, variant: s.variant || "", opts: p.opts, note: s.note.trim(), unit: p.unit, qty: s.qty };
+      const same = S.cart.find(x => x.item === c.item && x.variant === c.variant && x.opts.join() === c.opts.join() && x.note === c.note);
+      if (same) same.qty += c.qty; else S.cart.push(c);
+      S.sel = null; S.sentText = ""; toast("已加入清單"); render(); scrollToId("cart"); return;
+    }
+    case "delcart": S.cart.splice(+b.dataset.i, 1); break;
+    case "sendline": case "copyorder": {
+      if (!S.name.trim()) { toast("請填寫訂購人"); const n = $("#o-name"); if (n) n.focus(); return; }
+      store.set("tmjh-name", S.name.trim());
+      const text = orderLines().join("\n");
+      S.sentText = text;
+      if (a === "copyorder") { copyText(text, "已複製，請貼到 LINE 群組"); render(); return; }
+      render();
+      const link = document.createElement("a");
+      link.href = "https://line.me/R/share?text=" + encodeURIComponent(text); link.target = "_blank"; link.rel = "noopener";
+      document.body.appendChild(link); link.click(); link.remove();
+      return;
+    }
+    case "newcart": S.cart = []; S.sentText = ""; S.sel = null; window.scrollTo(0, 0); break;
+    // tally
+    case "addtally": {
+      const rows = parseOrders($("#tally-paste").value);
+      if (!rows.length) { S.pasteMsg = `沒有找到訂單。訂單文字會以「${MARK}」開頭，請確認有整段複製。`; break; }
+      const have = new Set(S.tally.map(rowKey)); let added = 0, dup = 0;
+      rows.forEach(r => { const k = rowKey(r); if (have.has(k)) dup++; else { have.add(k); S.tally.push(r); added++; } });
+      store.set("tmjh-tally", JSON.stringify(S.tally));
+      S.tallyMenu = rows[rows.length - 1].menu;
+      S.pasteMsg = `加入 ${added} 筆訂單${dup ? `，略過 ${dup} 筆重複` : ""}。`; break;
+    }
+    case "deltally": S.tally.splice(+b.dataset.i, 1); store.set("tmjh-tally", JSON.stringify(S.tally)); break;
+    case "askcleartally": S.confirmDel = "tally"; break;
+    case "cleartally": S.tally = []; store.set("tmjh-tally", "[]"); S.confirmDel = null; S.pasteMsg = ""; break;
+    case "copystore": {
+      const rows = S.tally.filter(r => r.menu === S.tallyMenu), { agg } = aggregate(rows);
+      const text = `【${S.tallyMenu}】訂購清單\n` + agg.map(x => `${x.item}${x.variant ? `（${x.variant}）` : ""}${x.opts ? ` ${x.opts}` : ""}${x.note ? ` [${x.note}]` : ""} × ${x.qty}`).join("\n")
+        + `\n共 ${rows.reduce((s, o) => s + o.qty, 0)} 份，總金額 ${money(rows.reduce((s, o) => s + o.total, 0))}`;
+      copyText(text, "已複製叫餐清單"); return;
+    }
+    // admin
     case "recognize": return recognize();
     case "clearfiles": S.files.forEach(f => URL.revokeObjectURL(f.url)); S.files = []; S.recogError = ""; break;
     case "newmenu": S.draft = toDraft({ type: b.dataset.type, open: true, items: [{ category: b.dataset.type === "drink" ? "茶類" : "主餐", name: "", price: "" }], options: cloneDefaults(b.dataset.type) }); break;
-    case "editmenu": S.draft = toDraft(menuById(b.dataset.id)); S.confirmDel = null; break;
-    case "toggleopen": { const m = menuById(b.dataset.id); try { await S.db.doc("menus/" + m.id).update({ open: !m.open }); toast(m.open ? "已關閉點餐" : "已開放點餐"); } catch { toast("更新失敗"); } return; }
+    case "editmenu": S.draft = toDraft(menuById(b.dataset.id)); S.confirmDel = null; window.scrollTo(0, 0); break;
+    case "toggleopen": { const menus = S.menus.map(m => m.id === b.dataset.id ? { ...m, open: !m.open } : m); const was = menuById(b.dataset.id).open; if (await persist(menus, was ? "已關閉點餐" : "已開放點餐")) render(); return; }
     case "canceledit": S.draft = null; S.confirmDel = null; break;
-    case "savemenu": return saveMenu();
+    case "savemenu": {
+      const m = fromDraft(d);
+      if (!m.items.length) { toast("至少需要一個品項"); return; }
+      const menus = S.menus.some(x => x.id === m.id) ? S.menus.map(x => x.id === m.id ? m : x) : [m, ...S.menus];
+      if (await persist(menus, "已儲存菜單")) { S.draft = null; S.confirmDel = null; render(); }
+      return;
+    }
     case "additem": d.items.push({ id: uid(), category: d.items.length ? d.items[d.items.length - 1].category : "", name: "", price: "", variantsText: "" }); break;
     case "delitem": d.items.splice(+b.dataset.i, 1); break;
     case "addgroup": d.options.push({ id: uid(), name: "", multi: false, required: false, choices: [{ name: "", price: 0 }] }); break;
@@ -532,10 +573,8 @@ document.addEventListener("click", async e => {
     case "delchoice": d.options[+b.dataset.gi].choices.splice(+b.dataset.ci, 1); break;
     case "loaddefaults": { const names = new Set(d.options.map(g => g.name)); cloneDefaults(d.type).forEach(g => { if (!names.has(g.name)) d.options.push(g); }); toast("已加入預設選項"); break; }
     case "askdelmenu": S.confirmDel = "menu"; break;
-    case "delmenu": {
-      const id = d.id; try { for (const o of S.orders.filter(o => o.menuId === id)) await S.db.doc("orders/" + o.id).delete(); await S.db.doc("menus/" + id).delete(); toast("已刪除菜單"); } catch { toast("刪除失敗"); }
-      S.draft = null; S.confirmDel = null; break;
-    }
+    case "delmenu": { if (await persist(S.menus.filter(x => x.id !== d.id), "已刪除菜單")) { S.draft = null; S.confirmDel = null; render(); } return; }
+    case "canceldel": S.confirmDel = null; break;
     default: return;
   }
   render();
@@ -545,21 +584,21 @@ document.addEventListener("change", e => {
   const t = e.target, a = t.dataset.act;
   if (a === "variant") { S.sel.variant = t.value; return softTotal(); }
   if (a === "opt") {
-    const m = menuById(S.orderMenuId), g = m.options.find(x => x.id === t.dataset.g);
+    const g = menuById(S.orderMenuId).options.find(x => x.id === t.dataset.g);
     if (g.multi) { const cur = new Set(S.sel.opts[g.id] || []); t.checked ? cur.add(t.value) : cur.delete(t.value); S.sel.opts[g.id] = [...cur]; }
     else S.sel.opts[g.id] = [t.value];
     return softTotal();
   }
-  if (a === "qtyset") { S.sel.qty = Math.max(1, parseInt(t.value) || 1); return render(); }
-  if (a === "statsmenu") { S.statsMenuId = t.value; return render(); }
+  if (a === "qtyset") { S.sel.qty = Math.max(1, parseInt(t.value) || 1); return softTotal(); }
+  if (a === "tallymenu") { S.tallyMenu = t.value; return render(); }
   if (a === "files") { addFiles(t.files); t.value = ""; return; }
   if (S.draft && t.dataset.bind === "type") { S.draft.type = t.value; return render(); }
-  if (S.draft && t.type === "checkbox") { bindDraft(t); }
+  if (S.draft && t.type === "checkbox") bindDraft(t);
 });
 document.addEventListener("input", e => {
   const t = e.target, a = t.dataset.act;
   if (a === "note") S.sel.note = t.value;
-  else if (a === "name") S.sel.name = t.value;
+  else if (a === "name") S.name = t.value;
   else if (S.draft && t.type !== "checkbox") bindDraft(t);
 });
 function bindDraft(t) {
@@ -569,13 +608,23 @@ function bindDraft(t) {
   else if (t.dataset.c != null) d.options[+t.dataset.g].choices[+t.dataset.c][t.dataset.f] = v;
   else if (t.dataset.g != null) d.options[+t.dataset.g][t.dataset.f] = v;
 }
-function softTotal() { const t = selTotal(), el = $("#o-total"); if (el) { el.textContent = money(t.total); el.previousElementSibling.textContent = `單價 ${money(t.unit)} × ${S.sel.qty}`; } }
+function softTotal() { const m = menuById(S.orderMenuId), p = selPrice(m, S.sel), el = $("#o-total"); if (el) el.textContent = money(p.unit * S.sel.qty); }
 
-// drag & drop
 document.addEventListener("dragover", e => { const d = e.target.closest && e.target.closest("#drop"); if (d) { e.preventDefault(); d.classList.add("over"); } });
 document.addEventListener("dragleave", e => { const d = e.target.closest && e.target.closest("#drop"); if (d) d.classList.remove("over"); });
 document.addEventListener("drop", e => { const d = e.target.closest && e.target.closest("#drop"); if (d) { e.preventDefault(); d.classList.remove("over"); addFiles(e.dataTransfer.files); } });
 
-boot();
+// ---------- boot ----------
+render();
+if (window.claude && claude.use) {
+  Promise.all([claude.use("user"), claude.use("artifact"), claude.use("sample")]).then(async ([user, artifact, sample]) => {
+    let owner = false;
+    try { owner = user ? !!(await user.canEdit()) : false; } catch {}
+    if (!owner) return;
+    S.isOwner = true; S.artifact = artifact; S.sample = sample;
+    if (!S.menus.length) S.tab = "admin";
+    render();
+  });
+}
 })();
 </script>
