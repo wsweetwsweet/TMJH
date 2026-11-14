@@ -321,7 +321,7 @@ function renderAdmin() {
   const canAI = S.aiReady;
   return `<section class="card">
     <h3>上傳菜單，自動辨識</h3>
-    <p class="muted small">拍下或掃描店家的紙本菜單（可一次選多張）。辨識後會產生品項與價格，並附上預設的升級選項，你可以再修改。</p>
+    <p class="muted small">拍下店家的紙本菜單（可一次選多張），用 Google 免費的文字辨識讀出品名和價格，並附上預設的升級選項，你可以再修改。照片越正面、越清楚越準。</p>
     <label class="drop" id="drop" for="menu-files">
       <strong>點這裡選擇菜單照片</strong><span class="muted small">或把圖片拖曳到這裡　·　JPG / PNG</span>
     </label>
@@ -332,8 +332,13 @@ function renderAdmin() {
       <button class="btn primary" data-act="recognize" ${!S.files.length || S.recognizing || !canAI ? "disabled" : ""}>${S.recognizing ? `<span class="spin"></span>辨識中…` : "開始辨識"}</button>
       ${S.files.length ? `<button class="btn ghost" data-act="clearfiles">清除照片</button>` : ""}
     </div>
-    ${!canAI ? `<div class="notice">此環境無法使用自動辨識，請改用下方「手動建立」。（要開啟自動辨識，請在 Apps Script 設定 ANTHROPIC_API_KEY）</div>` : ""}
+    ${!canAI ? `<div class="notice">照片辨識還沒開啟：請到 Apps Script 左側「服務 ＋」加入 Drive API。現在可以先用下方「貼上文字」或手動建立。</div>` : ""}
     ${S.recogError ? `<div class="notice err">${esc(S.recogError)}</div>` : ""}
+    <details class="stack" ${S.pasteText ? "open" : ""}><summary style="cursor:pointer;font-weight:500">或貼上菜單文字</summary>
+      <p class="muted small">一行一個品項，例如「排骨便當 90」、「紅茶 M30 L40」、「加珍珠 10」。沒有價格的短句會當成分類。</p>
+      <textarea id="paste-text" rows="6" placeholder="招牌便當&#10;排骨便當 90&#10;雞腿便當 110&#10;加滷蛋 10">${esc(S.pasteText || "")}</textarea>
+      <div><button class="btn" data-act="fromtext" ${S.recognizing ? "disabled" : ""}>從文字建立菜單</button></div>
+    </details>
     <div class="row muted small"><button class="btn sm ghost" data-act="logout">登出管理</button>沒有照片？<button class="btn sm" data-act="newmenu" data-type="bento">手動建立便當菜單</button><button class="btn sm" data-act="newmenu" data-type="drink">手動建立飲料菜單</button></div>
   </section>
   <section class="stack">
@@ -445,7 +450,22 @@ async function recognize() {
     const blobs = await Promise.all(S.files.map(f => shrink(f.file)));
     const imgs = await Promise.all(blobs.map(b => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res({ mime: b.type || "image/jpeg", data: String(fr.result).split(",")[1] }); fr.onerror = rej; fr.readAsDataURL(b); })));
     const r = await api("recognizeMenu", S.pw, imgs, forced);
-    if (!r || !Array.isArray(r.items)) throw { message: "沒有辨識到品項，請換一張更清楚、正面拍攝的照片再試一次。" };
+    buildDraft(r, forced);
+    S.files.forEach(f => URL.revokeObjectURL(f.url)); S.files = [];
+  } catch (e) {
+    S.recogError = (e && e.message) || "辨識失敗，請再試一次";
+  }
+  S.recognizing = false; render();
+}
+async function fromText() {
+  const text = $("#paste-text").value, forced = $("#ai-type").value;
+  S.recognizing = true; S.recogError = ""; S.pasteText = text; render();
+  try { buildDraft(await api("parseMenuText", S.pw, text, forced), forced); S.pasteText = ""; }
+  catch (e) { S.recogError = (e && e.message) || "整理失敗，請再試一次"; }
+  S.recognizing = false; render();
+}
+function buildDraft(r, forced) {
+    if (!r || !Array.isArray(r.items) || !r.items.length) throw { message: "沒有辨識到品項，請換一張更清楚、正面拍攝的照片再試一次。" };
     const type = forced !== "auto" ? forced : (r.type === "drink" ? "drink" : "bento");
     const options = cloneDefaults(type);
     const addons = Array.isArray(r.addons) ? r.addons.filter(a => a && a.name) : [];
@@ -459,12 +479,7 @@ async function recognize() {
     }
     S.draft = toDraft({ name: r.store || "", type, open: true, options,
       items: r.items.filter(i => i && i.name).map(i => ({ category: i.category, name: i.name, price: +i.price || 0, variants: Array.isArray(i.variants) ? i.variants.filter(v => v && v.name).map(v => ({ name: String(v.name), price: +v.price || 0 })) : [] })),
-      aiNote: `辨識出 ${r.items.length} 個品項${addons.length ? `、${addons.length} 個店家加購項目` : ""}。請核對品名與價格，並調整下方的升級選項後再儲存。` });
-    S.files.forEach(f => URL.revokeObjectURL(f.url)); S.files = [];
-  } catch (e) {
-    S.recogError = (e && e.message) || "辨識失敗，請再試一次";
-  }
-  S.recognizing = false; render();
+      aiNote: `找到 ${r.items.length} 個品項${addons.length ? `、${addons.length} 個店家加購項目` : ""}。自動辨識可能有錯字或漏項，請對照菜單核對品名與價格，再調整下方的升級選項後儲存。` });
 }
 
 // ---------- actions ----------
@@ -524,6 +539,7 @@ document.addEventListener("click", async e => {
     case "delorder": try { await api("deleteOrder", b.dataset.id, S.mine[b.dataset.id] || "", S.pw); delete S.mine[b.dataset.id]; saveMine(); toast("已刪除"); await load(); } catch (err) { toast("刪除失敗：" + err.message); } S.confirmDel = null; break;
     case "copy": return copyList();
     case "recognize": return recognize();
+    case "fromtext": return fromText();
     case "clearfiles": S.files.forEach(f => URL.revokeObjectURL(f.url)); S.files = []; S.recogError = ""; break;
     case "newmenu": S.draft = toDraft({ type: b.dataset.type, open: true, items: [{ category: b.dataset.type === "drink" ? "茶類" : "主餐", name: "", price: "" }], options: cloneDefaults(b.dataset.type) }); break;
     case "editmenu": S.draft = toDraft(menuById(b.dataset.id)); S.confirmDel = null; break;

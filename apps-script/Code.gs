@@ -7,14 +7,15 @@
  *
  * 需要在「專案設定 → 指令碼屬性」設定：
  *   ADMIN_PASSWORD     管理菜單用的密碼（必填）
- *   ANTHROPIC_API_KEY  Claude API 金鑰（選填；沒填就只能手動建立菜單）
+ *
+ * 菜單照片辨識使用 Google 雲端硬碟內建的文字辨識（免費），
+ * 需要在左側「服務 ＋」加入 Drive API。
  */
 
 var MENU_SHEET = '菜單';
 var ORDER_SHEET = '訂單';
 var MENU_HEAD = ['id', '名稱', '類型', '開放', '建立時間', '資料JSON'];
 var ORDER_HEAD = ['時間', '菜單', '訂購人', '品項', '規格', '選項', '備註', '數量', '單價', '金額', 'id', 'menuId', 'key', 'optsJSON'];
-var CLAUDE_MODEL = 'claude-opus-5-5';
 
 // ---------- 網頁 ----------
 function doGet() {
@@ -85,7 +86,7 @@ function readOrders_() {
 
 // ---------- 公開 API（任何人都能呼叫） ----------
 function getData() {
-  return { menus: readMenus_(), orders: readOrders_(), aiReady: !!prop_('ANTHROPIC_API_KEY') };
+  return { menus: readMenus_(), orders: readOrders_(), aiReady: ocrReady_() };
 }
 
 function submitOrder(o) {
@@ -191,60 +192,116 @@ function deleteMenu(pw, id) {
   });
 }
 
-// ---------- 菜單辨識（呼叫 Claude API） ----------
+// ---------- 菜單辨識（Google 雲端硬碟內建文字辨識，免費、不需金鑰） ----------
+function ocrReady_() { return typeof Drive !== 'undefined' && !!Drive.Files; }
+
+function ocrImage_(img, i) {
+  var blob = Utilities.newBlob(Utilities.base64Decode(img.data), img.mime || 'image/jpeg', 'menu' + i + '.jpg');
+  var file;
+  if (Drive.Files.create) { // Drive API v3
+    file = Drive.Files.create({ name: 'TMJH 菜單辨識暫存', mimeType: 'application/vnd.google-apps.document' }, blob, { ocrLanguage: 'zh-TW' });
+  } else { // Drive API v2
+    file = Drive.Files.insert({ title: 'TMJH 菜單辨識暫存', mimeType: blob.getContentType() }, blob, { ocr: true, ocrLanguage: 'zh-TW' });
+  }
+  try {
+    return DocumentApp.openById(file.id).getBody().getText();
+  } finally {
+    try { DriveApp.getFileById(file.id).setTrashed(true); } catch (e) {}
+  }
+}
+
 function recognizeMenu(pw, images, forcedType) {
   checkAdmin_(pw);
-  var key = prop_('ANTHROPIC_API_KEY');
-  if (!key) throw new Error('尚未設定 ANTHROPIC_API_KEY，無法自動辨識。可以先用手動建立。');
+  if (!ocrReady_()) throw new Error('尚未開啟「Drive API」服務。請到 Apps Script 左側「服務 ＋」加入 Drive API 後再試。');
   if (!images || !images.length) throw new Error('請先選擇菜單照片');
-
-  var prompt = '你是台灣餐飲菜單辨識助手。請閱讀附上的菜單照片（可能多張，屬於同一家店），把所有可點的品項整理成 JSON。\n' +
-    '規則：\n' +
-    '- 只輸出 JSON，不要任何說明文字或 markdown。\n' +
-    '- 價格用新台幣整數。看不清楚的價格填 0。\n' +
-    '- 同一品項有多種尺寸／價格（例如中杯 M、大杯 L，或小/大份）時，放在 variants 陣列，price 填最低價；只有一種價格時 variants 給空陣列。\n' +
-    '- category 用菜單上的分類（例如：招牌便當、炸物、茶類、奶茶、鮮奶），沒有分類就填「主餐」或「飲品」。\n' +
-    '- addons：菜單上明確列出的加購／加料／升級項目（例如：加珍珠 +10、加蛋 +10、升級套餐 +30），沒有就給空陣列。\n' +
-    '- type：便當／餐點類填 "bento"，飲料店填 "drink"。' + (forcedType === 'bento' || forcedType === 'drink' ? '本菜單已確定是 "' + forcedType + '"。' : '') + '\n' +
-    '- store：店名（看得到的話），否則空字串。\n' +
-    '格式：{"store":"","type":"bento","items":[{"category":"","name":"","price":0,"variants":[{"name":"M","price":0}]}],"addons":[{"group":"加料","name":"珍珠","price":10}]}';
-
-  var content = images.slice(0, 6).map(function (img) {
-    return { type: 'image', source: { type: 'base64', media_type: img.mime || 'image/jpeg', data: img.data } };
-  });
-  content.push({ type: 'text', text: prompt });
-
-  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post',
-    contentType: 'application/json',
-    muteHttpExceptions: true,
-    headers: {
-      'x-api-key': key,
-      'anthropic-version': '2026-10-21',
-      'anthropic-beta': 'server-side-fallback-2026-07-01'
-    },
-    payload: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 16000,
-      output_config: { effort: 'low' },
-      fallbacks: 'default',
-      messages: [{ role: 'user', content: content }]
-    })
-  });
-
-  var code = res.getResponseCode();
-  var body = {};
-  try { body = JSON.parse(res.getContentText()); } catch (e) {}
-  if (code === 401) throw new Error('Claude API 金鑰無效，請檢查 ANTHROPIC_API_KEY。');
-  if (code === 429) throw new Error('辨識次數太頻繁，請稍等一分鐘再試。');
-  if (code !== 200) throw new Error('辨識失敗（' + code + '）：' + ((body.error && body.error.message) || '請再試一次'));
-  if (body.stop_reason === 'refusal') throw new Error('這張圖片無法辨識，請換一張菜單照片。');
-
-  var text = (body.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('');
-  var s = text.indexOf('{'), e = text.lastIndexOf('}');
-  if (s < 0 || e < s) throw new Error('沒有辨識到品項，請換一張更清楚、正面拍攝的照片。');
-  var data;
-  try { data = JSON.parse(text.slice(s, e + 1)); } catch (err) { throw new Error('辨識結果格式不正確，請再試一次。'); }
-  if (!data || !data.items || !data.items.length) throw new Error('沒有辨識到品項，請換一張更清楚、正面拍攝的照片。');
+  var text = images.slice(0, 6).map(ocrImage_).join('\n');
+  var data = parseMenu_(text, forcedType);
+  if (!data.items.length) throw new Error('照片裡沒有找到「品名＋價格」。請換一張更清楚、正面拍攝的照片，或改用「貼上文字」。');
+  data.rawText = text;
   return data;
+}
+
+function parseMenuText(pw, text, forcedType) {
+  checkAdmin_(pw);
+  text = String(text || '').trim();
+  if (!text) throw new Error('請先貼上菜單文字');
+  // 允許直接貼上 JSON（例如請 Claude 聊天整理好的結果）
+  var s = text.indexOf('{'), e = text.lastIndexOf('}');
+  if (s >= 0 && e > s) {
+    try {
+      var j = JSON.parse(text.slice(s, e + 1));
+      if (j && j.items && j.items.length) return j;
+    } catch (err) {}
+  }
+  var data = parseMenu_(text, forcedType);
+  if (!data.items.length) throw new Error('沒有找到「品名＋價格」。每行請寫成像「排骨便當 90」或「紅茶 M30 L40」的格式。');
+  return data;
+}
+
+/** 把一段菜單文字整理成 {store, type, items, addons}。盡量猜，不準的部分讓管理員在畫面上修改。 */
+function parseMenu_(text, forcedType) {
+  var SIZE_WORDS = /^(M|L|XL|S|中|大|小|特大|中杯|大杯|小杯|瓶|冰|熱)$/i;
+  var lines = String(text).replace(/\r/g, '').split('\n')
+    .map(function (l) { return l.replace(/[　\t]+/g, ' ').replace(/[｜|•●○◎★☆※]/g, ' ').trim(); })
+    .filter(function (l) { return l; });
+  var items = [], addons = [], category = '', prevCategory = '', sizeLabels = null, pendingName = '', store = '';
+
+  function toHalf(str) { return str.replace(/＄/g, '$').replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }); }
+  function prices(line) {
+    var out = [], re = /(?:([A-Za-z一-鿿]{1,2})\s*[:：]?\s*)?\$?\s*(\d{2,4})\s*(?:元)?/g, m;
+    while ((m = re.exec(line))) {
+      var n = +m[2];
+      if (n >= 5 && n <= 3000) out.push({ label: m[1] && SIZE_WORDS.test(m[1]) ? m[1] : '', price: n, index: m.index });
+    }
+    return out;
+  }
+  function cleanName(str) {
+    return str.replace(/\$?\s*\d{2,4}\s*元?/g, ' ').replace(/(^|\s)(M|L|XL|中杯|大杯|小杯)\s*[:：]?(?=\s|$)/gi, ' ')
+      .replace(/[.。…·\-–—_~～:：、,，()（）\[\]【】]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function addItem(name, ps) {
+    var variants = [];
+    if (ps.length > 1) {
+      variants = ps.map(function (p, i) {
+        return { name: p.label || (sizeLabels && sizeLabels[i]) || (ps.length === 2 ? ['M', 'L'][i] : '規格' + (i + 1)), price: p.price };
+      });
+    }
+    var item = { category: category || '', name: name, price: Math.min.apply(null, ps.map(function (p) { return p.price; })), variants: variants };
+    if (/^加/.test(name) && ps.length === 1) addons.push({ group: '加購', name: name.replace(/^加\s*/, '加'), price: ps[0].price });
+    else items.push(item);
+  }
+
+  lines.forEach(function (raw) {
+    var line = toHalf(raw);
+    // 表頭：「M L」、「中杯 大杯」之類，記下尺寸名稱
+    var words = line.split(/\s+/);
+    if (words.length >= 2 && words.length <= 4 && words.every(function (w) { return SIZE_WORDS.test(w); })) { sizeLabels = words; return; }
+    // 電話、地址、營業時間等不是品項
+    if (/電話|tel|地址|營業|外送|line|訂購專線|\d{2,4}-\d{3,4}-?\d{3,4}|\d{1,2}:\d{2}/i.test(line)) return;
+    var ps = prices(line);
+    var name = cleanName(line);
+    if (!ps.length) {
+      // 沒有價格的短句：可能是分類標題，也可能是品名（價格在下一行）
+      if (name && name.length <= 12 && !/\d/.test(name)) {
+        if (!store && !items.length && !category) { store = name; return; }
+        prevCategory = category; category = name; pendingName = name;
+      }
+      return;
+    }
+    if (!name) {
+      // 只有價格的一行：接到上一行的品名
+      if (pendingName) { category = prevCategory; addItem(pendingName, ps); }
+      pendingName = '';
+      return;
+    }
+    pendingName = '';
+    addItem(name, ps);
+  });
+
+  var all = items.map(function (i) { return i.name + i.category; }).join('');
+  var drinkScore = (all.match(/茶|奶|拿鐵|咖啡|果汁|冰沙|多多|飲|鮮乳|養樂多|檸檬|冬瓜|綠|烏龍/g) || []).length;
+  var bentoScore = (all.match(/飯|便當|麵|雞|豬|排骨|魚|牛|餐|丼|咖哩|滷|炒/g) || []).length;
+  var type = forcedType === 'bento' || forcedType === 'drink' ? forcedType : (drinkScore > bentoScore ? 'drink' : 'bento');
+  items.forEach(function (i) { if (!i.category) i.category = type === 'drink' ? '飲品' : '主餐'; });
+  return { store: store, type: type, items: items, addons: addons };
 }
